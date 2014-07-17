@@ -1,33 +1,6 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <pthread.h>
-#include <time.h>
-
 #include "load.h"
 
 #define PUBLIC __attribute__ ((visibility ("default")))
-
-static int finish = 0;
-
-static void work(void* arg)
-{
-    while (!finish)
-    {
-        // do some work
-        int i;
-        for (i = 0; i < 1000; i++)
-            free(malloc(0x1000));
-        // limit loop to STEP_MS
-#define STEP_MS 10
-#define STEP_NS (STEP_MS * 1000000)
-        struct timespec t;
-        clock_gettime(CLOCK_REALTIME, &t);
-        long sleep_ns = STEP_NS - (t.tv_nsec % STEP_NS);
-        t.tv_sec = 0;
-        t.tv_nsec = sleep_ns;
-        nanosleep(&t, NULL);    
-    }
-}
 
 static void work_local(void* arg)
 {
