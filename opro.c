@@ -32,9 +32,17 @@ struct mm_t
 
 static int finish = 0;
 static pthread_t t;
+#define MAX_THREAD_SAMPLE_LOGS 50
+struct thread_sample_t
+{
+    pid_t tid;
+    uint32_t sample_count;
+};
+static struct thread_sample_t thread_samples[MAX_THREAD_SAMPLE_LOGS] = {};
 static struct mm_t image_mm;
 static profile_counter_image = 0;
 static profile_counter_other = 0;
+static pthread_mutex_t lock;
 
 #define MAX_IGNORED_ADDRESSES 100
 static int num_ignored_addresses = 0;
@@ -53,6 +61,8 @@ static int is_ignored_addr(uint64_t addr)
 
 static void profile_action(int sig, siginfo_t* info, void* context)
 {
+    pthread_mutex_lock(&lock);
+/*
     ucontext_t* ucontext = (ucontext_t*)context;
     mcontext_t* mcontext = &ucontext->uc_mcontext;
 #if defined(__amd64)
@@ -65,8 +75,27 @@ static void profile_action(int sig, siginfo_t* info, void* context)
 #error ("cpu not supported")
 #endif
     uint64_t pc = mcontext->gregs[REG_PC];
-    //if (pc <= TASK_SIZE)
-      //  printf("profile_action tid: %d, pc: 0x%"PRIx64"\n", (int)syscall(SYS_gettid), pc);
+    if (pc <= TASK_SIZE)
+        printf("profile_action tid: %d, pc: 0x%"PRIx64"\n", (int)syscall(SYS_gettid), pc);
+*/
+
+    // update thread sample count
+    int i;
+    pid_t tid = syscall(SYS_gettid);
+    for (i = 0; i < MAX_THREAD_SAMPLE_LOGS; i++)
+    {
+        if (thread_samples[i].tid == 0)
+        {
+            thread_samples[i].tid = tid;
+            thread_samples[i].sample_count++;
+            break;
+        }
+        else if (thread_samples[i].tid == tid)
+        {
+            thread_samples[i].sample_count++;
+            break;
+        }
+    }
 
 #define FRAME_MAX 10
     // initialize libunwind
@@ -75,7 +104,7 @@ static void profile_action(int sig, siginfo_t* info, void* context)
     unw_cursor_t cursor;
     unw_init_local(&cursor, &ctx);
     // search calls from our image code
-    int i = 0;
+    i = 0;
     int in_image = 0;
     while (unw_step(&cursor) > 0 && i < FRAME_MAX)
     {
@@ -97,6 +126,8 @@ static void profile_action(int sig, siginfo_t* info, void* context)
     }
     if (!in_image)
         profile_counter_other++;
+
+    pthread_mutex_unlock(&lock);
 }
 
 static void setup_profile_handler()
@@ -256,7 +287,13 @@ PUBLIC int opro_start(char* image_name)
     }
     image_mm = *imm;
     printf("profiling image: %s, 0x%"PRIx64"-0x%"PRIx64"\n", imm->name, imm->start, imm->end);
-    int res = pthread_create(&t, NULL, (void*)&profile_thread, NULL);
+    int res = pthread_mutex_init(&lock, NULL);
+    if (res)
+    {
+        perror("pthread_mutex_init failed");
+        return OPRO_FAILURE;
+    }
+    res = pthread_create(&t, NULL, (void*)&profile_thread, NULL);
     if (res)
     {
         perror("pthread_create failed");
@@ -267,9 +304,26 @@ PUBLIC int opro_start(char* image_name)
 
 PUBLIC int opro_stop()
 {
+    // stop sampling
     finish = 1;
     pthread_join(t, NULL);
-    printf("\n\nprofile_counter_image: %d\nprofile_counter_other: %d\n", profile_counter_image, profile_counter_other);
+    pthread_mutex_destroy(&lock);
+    // print profile result
+    printf("\n\n");
+    int i;
+    int total = 0;
+    for (i = 0; i < MAX_THREAD_SAMPLE_LOGS; i++)
+    {
+        if (thread_samples[i].tid == 0)
+            break;
+        printf("thread %02d: %d\tsample count: %d\n", i, thread_samples[i].tid, thread_samples[i].sample_count);
+        total += thread_samples[i].sample_count;
+    }
+    printf("total: %d\n", total);
+    printf("\n\n");
+    printf("profile_counter_image: %d\n", profile_counter_image);
+    printf("profile_counter_other: %d\n", profile_counter_other);
+    printf("total:                 %d\n", profile_counter_image + profile_counter_other);
     return OPRO_SUCCESS;
 }
 
