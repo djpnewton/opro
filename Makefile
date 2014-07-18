@@ -1,16 +1,38 @@
+CFLAGS =
+LDFLAGS =
+
+ANDROID =
+X86 = 
+ifdef ANDROID
+	ifdef X86
+		#TODO
+	else
+		NDK_TOOLCHAIN = /opt/android-ndk-r9b/toolchains/arm-linux-androideabi-4.8/prebuilt/linux-x86_64
+		PREFIX = $(NDK_TOOLCHAIN)/bin/arm-linux-androideabi-
+		SYSROOT = /opt/android-ndk-r9b/platforms/android-9/arch-arm
+		CFLAGS += --sysroot=$(SYSROOT)
+		CFLAGS += -I$(NDK_TOOLCHAIN)/user/include
+		CFLAGS += -L$(NDK_TOOLCHAIN)/user/lib
+		CFLAGS += -DANDROID
+	endif
+endif
+
 AR = $(PREFIX)ar
 CC = $(PREFIX)gcc
 CXX = $(PREFIX)g++
-CFLAGS = -g -O0 -fPIC -fvisibility=hidden #--sysroot $(SYSROOT)
+CFLAGS += -g -O0 -fPIC -fvisibility=hidden
 
 SRC = $(wildcard *.c)
 OBJ = $(SRC:.c=.o)
 
-SO_LIBS = -lpthread -lunwind
+SO_LIBS = -lunwind
+APP_LIBS = -lunwind
 ifdef ANDROID
 SO_LIBS += -llog
+else
+SO_LIBS += -lpthread
+APP_LIBS += -lpthread
 endif
-APP_LIBS = -lpthread -lunwind
 
 
 %.o: %.c
@@ -23,7 +45,7 @@ libload.so: load.o
 	$(CC) $(CFLAGS) -o $@ $^ $(SO_LIBS) -shared -Wl,--exclude-libs=ALL
 
 testapp: libopro.so libload.so testapp.o 
-	$(CC) $(LDFLAGS) -o $@ $^ $(APP_LIBS) -lopro -lload -L. -Wl,-rpath=.
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(APP_LIBS) -lopro -lload -L. -Wl,-rpath=.
 
 clean:
 	rm -f $(OBJ) testapp libopro.so libload.so

@@ -7,7 +7,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
-#include <ucontext.h>
+//#include <ucontext.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
 
@@ -81,7 +81,11 @@ static void profile_action(int sig, siginfo_t* info, void* context)
 
     // update thread sample count
     int i;
+#ifdef ANDROID
+    pid_t tid = gettid();
+#else
     pid_t tid = syscall(SYS_gettid);
+#endif
     for (i = 0; i < MAX_THREAD_SAMPLE_LOGS; i++)
     {
         if (thread_samples[i].tid == 0)
