@@ -1,7 +1,7 @@
 CFLAGS =
 LDFLAGS =
 
-ANDROID =
+ANDROID = 1
 X86 = 
 ifdef ANDROID
 	ifdef X86
@@ -25,10 +25,10 @@ CFLAGS += -g -O0 -fPIC -fvisibility=hidden
 SRC = $(wildcard *.c)
 OBJ = $(SRC:.c=.o)
 
-SO_LIBS = -lunwind
-APP_LIBS = -lunwind
+SO_LIBS = -Wl,-Bstatic -lunwind -Wl,-Bdynamic
+APP_LIBS =
 ifdef ANDROID
-SO_LIBS += -llog
+#SO_LIBS += -llog
 else
 SO_LIBS += -lpthread
 APP_LIBS += -lpthread
