@@ -10,6 +10,7 @@
 //#include <ucontext.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
+#include <dirent.h>
 
 #define UNW_LOCAL_ONLY
 #include <libunwind.h>
@@ -50,7 +51,7 @@ static void* ignored_addresses[MAX_IGNORED_ADDRESSES];
 
 static int is_ignored_addr(uint64_t addr)
 {
-#define THRESHOLD 5
+#define THRESHOLD 15
     int i;
     for (i = 0; i < num_ignored_addresses; i++)
         if (addr >= (uint64_t)ignored_addresses[i] - THRESHOLD &&
@@ -59,7 +60,50 @@ static int is_ignored_addr(uint64_t addr)
     return 0;
 }
 
-static void profile_action(int sig, siginfo_t* info, void* context)
+__attribute__((always_inline)) static int init_unwind(unw_context_t* ctx, unw_cursor_t* cursor)
+{
+    int res = unw_getcontext(ctx);
+    if (res != 0)
+    {
+        perror("unw_init_local failed");
+        return 0;
+    }
+    res = unw_init_local(cursor, ctx);
+    if (res != 0)
+    {
+        perror("unw_getcontext failed");
+        return 0;
+    }
+    return 1;
+}
+
+static void test_unwind()
+{
+    printf("test libunwind...\n");
+    // initialize libunwind
+    unw_context_t ctx;
+    unw_cursor_t cursor;
+    if (init_unwind(&ctx, &cursor))
+    {
+        printf("  unw_step()...\n");
+        while (unw_step(&cursor) > 0)
+        {
+            unw_word_t ip, sp;
+            unw_get_reg(&cursor, UNW_REG_IP, &ip);
+            unw_get_reg(&cursor, UNW_REG_SP, &sp);
+            printf("    ip = %08lx, sp = %08lx\n", (long) ip, (long) sp);
+        }
+    }
+}
+
+#ifndef ANDROID
+pid_t gettid()
+{
+    return syscall(SYS_gettid);
+}
+#endif
+
+__attribute__((never_inline)) static void profile_action(int sig, siginfo_t* info, void* context)
 {
     pthread_mutex_lock(&lock);
 /*
@@ -81,11 +125,7 @@ static void profile_action(int sig, siginfo_t* info, void* context)
 
     // update thread sample count
     int i;
-#ifdef ANDROID
     pid_t tid = gettid();
-#else
-    pid_t tid = syscall(SYS_gettid);
-#endif
     for (i = 0; i < MAX_THREAD_SAMPLE_LOGS; i++)
     {
         if (thread_samples[i].tid == 0)
@@ -104,32 +144,33 @@ static void profile_action(int sig, siginfo_t* info, void* context)
 #define FRAME_MAX 10
     // initialize libunwind
     unw_context_t ctx;
-    unw_getcontext(&ctx);
     unw_cursor_t cursor;
-    unw_init_local(&cursor, &ctx);
-    // search calls from our image code
-    i = 0;
-    int in_image = 0;
-    while (unw_step(&cursor) > 0 && i < FRAME_MAX)
+    if (init_unwind(&ctx, &cursor))
     {
-        // ignore this function and sigaction() entries in backtrace
-        if (i > 1)
+        // search calls from our image code
+        i = 0;
+        int in_image = 0;
+        while (unw_step(&cursor) > 0 && i < FRAME_MAX)
         {
-            unw_word_t ip, sp;
-            unw_get_reg(&cursor, UNW_REG_IP, &ip);
-            unw_get_reg(&cursor, UNW_REG_SP, &sp);
-            //printf("ip = %lx, sp = %lx\n", (long) ip, (long) sp);
-            if (ip >= image_mm.start && ip <= image_mm.end && !is_ignored_addr(ip))
+            // ignore this function and sigaction() entries in backtrace
+            if (i > 1)
             {
-                profile_counter_image++;
-                in_image = 1;
-                break;
+                unw_word_t ip, sp;
+                unw_get_reg(&cursor, UNW_REG_IP, &ip);
+                unw_get_reg(&cursor, UNW_REG_SP, &sp);
+                //printf("i = %d, ip = %016lx, sp = %016lx\n", i, (long) ip, (long) sp);
+                if (ip >= image_mm.start && ip <= image_mm.end && !is_ignored_addr(ip))
+                {
+                    profile_counter_image++;
+                    in_image = 1;
+                    break;
+                }
             }
+            i++;
         }
-        i++;
+        if (!in_image)
+            profile_counter_other++;
     }
-    if (!in_image)
-        profile_counter_other++;
 
     pthread_mutex_unlock(&lock);
 }
@@ -143,36 +184,106 @@ static void setup_profile_handler()
     int res = sigaction(SIGPROF, &action, NULL);
     if (res)
         perror("sigaction failed");
-
-	struct itimerval timer;
-    timer.it_interval.tv_sec = 0;
-    timer.it_interval.tv_usec = 10 * 1000; // 10ms
-    timer.it_value = timer.it_interval;
-    res = setitimer(ITIMER_PROF, &timer, NULL);
-    if (res)
-        perror("setitimer failed");
 }
 
-static void remove_profile_handler(void)
+static int load_thread_list(pid_t pid, int ignore_sleeping, pid_t* threads, int threads_max, int* threads_count)
 {
-    struct itimerval timer;
-    memset(&timer, 0, sizeof(timer));
-    int res = setitimer(ITIMER_PROF, &timer, NULL);
-    if (res)
-        perror("setitimer failed");
+    *threads_count = 0;
+    char path[1024];
+    sprintf(path, "/proc/%d/task", pid);
+    DIR* d = opendir(path);
+    if (!d)
+    {
+        perror("opendir(\"%s\") failed");
+        return 0;
+    }
+    struct dirent* ent = readdir(d);
+    while (ent && *threads_count < threads_max)
+    {
+        if (strcmp(ent->d_name, ".") != 0 && strcmp(ent->d_name, "..") != 0)
+        {
+            // check if thread is sleeping
+            if (ignore_sleeping)
+            {
+                sprintf(path, "/proc/%d/task/%s/stat", pid, ent->d_name);
+                int fd = open(path, O_RDONLY);
+                if (fd > 0)
+                {
+#define DAT_SIZE 0x1000
+                    char data[DAT_SIZE];
+                    ssize_t size = read(fd, data, DAT_SIZE);
+                    close(fd);
+                    if (size > 0)
+                    {
+                        char state = *(strchr(data, ')') + 2);
+                        //printf("thread: %s, state: %c\n", ent->d_name, state);
+                        if (state != 'R')
+                        {
+                            ent = readdir(d);
+                            continue;
+                        }
+                    }
+                    else
+                        perror("read failed");
+                }
+                else
+                    perror("open failed");
+            }
+            // add thread to list
+            pid_t tid;
+            sscanf(ent->d_name, "%d", &tid);
+            //printf("thread: %d\n", tid);
+            threads[*threads_count] = tid;
+            (*threads_count)++;
+        }
+        ent = readdir(d);
+    }
+    closedir(d);
+    return 0;
+}
+
+#ifdef ANDROID
+#define SYS_tgkill __NR_tgkill
+#endif
+static int tgkill(pid_t tgid, pid_t tid, int signalno)
+{
+    return syscall(SYS_tgkill, tgid, tid, signalno);
 }
 
 static void profile_thread(void* arg)
 {   
+    printf("profile_thread() entry, tid: %d\n", gettid());
+
+#define MAX_THREAD_LIST 50
+    int thread_count = 0;
+    pid_t thread_list[MAX_THREAD_LIST];
+
     setup_profile_handler();
+
+    pid_t tid = gettid();
 
     while (!finish)
     {
-        const struct timespec t = {0, 100 * 1000000}; // 100ms
+        pid_t pid = getpid();
+
+        load_thread_list(pid, 1, thread_list, MAX_THREAD_LIST, &thread_count);
+        //printf("thread count: %d\n", thread_count);
+
+        int i;
+        for (i = 0; i < thread_count; i++)
+        {
+            if (thread_list[i] != tid)
+            {
+                int res = tgkill(pid, thread_list[i], SIGPROF);
+                if (res)
+                    perror("tgkill failed");
+            }
+        }
+
+#define SLEEP_MS 10
+        const struct timespec t = {SLEEP_MS / 1000, (SLEEP_MS % 1000) * 1000000};
         nanosleep(&t, NULL);
     }
-    
-    remove_profile_handler();
 }
 
 static unsigned int stack_start;
@@ -345,4 +456,9 @@ PUBLIC int opro_ignore_address(void* address)
         printf("error: no space left in ignored_addresses\n");
         return OPRO_FAILURE;
     }
+}
+
+PUBLIC void opro_test_unwind()
+{
+    test_unwind();
 }

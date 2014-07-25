@@ -1,5 +1,7 @@
 #!/bin/sh
 
+set -e
+
 DIR=/data/dan
 
 echo "MAKE testapp..."

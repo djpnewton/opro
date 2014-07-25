@@ -7,5 +7,6 @@
 int opro_start(char* image_name);
 int opro_stop();
 int opro_ignore_address(void* address);
+void opro_test_unwind(void);
 
 #endif

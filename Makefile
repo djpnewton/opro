@@ -9,7 +9,7 @@ ifdef ANDROID
 	else
 		NDK_TOOLCHAIN = /opt/android-ndk-r9b/toolchains/arm-linux-androideabi-4.8/prebuilt/linux-x86_64
 		PREFIX = $(NDK_TOOLCHAIN)/bin/arm-linux-androideabi-
-		SYSROOT = /opt/android-ndk-r9b/platforms/android-9/arch-arm
+		SYSROOT = /opt/android-ndk-r9b/platforms/android-18/arch-arm
 		CFLAGS += --sysroot=$(SYSROOT)
 		CFLAGS += -I$(NDK_TOOLCHAIN)/user/include
 		CFLAGS += -L$(NDK_TOOLCHAIN)/user/lib
@@ -30,7 +30,7 @@ APP_LIBS =
 ifdef ANDROID
 #SO_LIBS += -llog
 else
-SO_LIBS += -lpthread
+SO_LIBS += -lpthread -llzma
 APP_LIBS += -lpthread
 endif
 
