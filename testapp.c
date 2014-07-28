@@ -55,26 +55,35 @@ void kill_test(int sig)
 
 void main()
 {
-    printf("main() entry, pid: %d\n", getpid());
-    // opro start
-    opro_test_unwind();
-    opro_ignore_address(load_wob_address_get);
-    opro_start("libload.so");
-    printf("opro_start()'ed\n");
-    // setup CTRL-C handler
-    signal(SIGINT, kill_test);
-    // do work in libload.so
-    printf("load_work()\n");
-    load_work(work, NUM_THREADS, threads);
-    load_work(work_lazy, NUM_THREADS, threads_lazy);
-    // do work via work_on_behalf function
-    printf("load_work_on_behalf()\n");
-    load_work_on_behalf(work, NUM_THREADS, threads_wob);
-    // wait
-    printf("wait..\n");
-    while (!finish)
-        sleep(1);
-    // opro stop
-    printf("opro_stop()\n");
-    opro_stop();
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        printf("main() entry, pid: %d\n", getpid());
+        // opro start
+        opro_test_unwind();
+        opro_ignore_address(load_wob_address_get);
+        opro_start("libload.so");
+        printf("opro_start()'ed\n");
+        // setup CTRL-C handler
+        signal(SIGINT, kill_test);
+        // do work in libload.so
+        printf("load_work()\n");
+        load_work(work, NUM_THREADS, threads);
+        load_work(work_lazy, NUM_THREADS, threads_lazy);
+        // do work via work_on_behalf function
+        printf("load_work_on_behalf()\n");
+        load_work_on_behalf(work, NUM_THREADS, threads_wob);
+        // wait
+        printf("wait..\n");
+        while (!finish)
+            sleep(1);
+        // opro stop
+        printf("opro_stop()\n");
+        opro_stop();
+    }
+    else if (pid > 0)
+    {
+        int status;
+        wait(&status);
+    }
 }

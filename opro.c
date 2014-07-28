@@ -126,6 +126,7 @@ __attribute__((never_inline)) static void profile_action(int sig, siginfo_t* inf
     // update thread sample count
     int i;
     pid_t tid = gettid();
+    //printf("profile_action() tid: %d\n", tid);
     for (i = 0; i < MAX_THREAD_SAMPLE_LOGS; i++)
     {
         if (thread_samples[i].tid == 0)
