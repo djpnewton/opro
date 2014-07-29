@@ -7,6 +7,8 @@ bindir = $(prefix)/bin
 libdir = $(prefix)/lib
 incdir = $(prefix)/include
 
+LIBUNWIND = 
+LIBCORKSCREW = 1
 ANDROID = 1
 X86 = 
 ifdef ANDROID
@@ -32,10 +34,24 @@ CFLAGS += -g -O0 -fPIC -fvisibility=hidden
 SRC = $(wildcard *.c)
 OBJ = $(SRC:.c=.o)
 
-SO_LIBS = -Wl,-Bstatic -lunwind -Wl,-Bdynamic
-APP_LIBS =
+SO_LIBS =
+APP_LIBS = -Wl,-Bstatic -lopro -Wl,-Bdynamic -lload 
+ifdef LIBUNWIND
+	SO_LIBS += -Wl,-Bstatic -lunwind
+	APP_LIBS += -Wl,-Bstatic -lunwind
+	CFLAGS += -DLIBUNWIND
+else
+	ifdef LIBCORKSCREW
+		SO_LIBS += -Wl,-Bstatic -lcorkscrew
+		APP_LIBS += -Wl,-Bstatic -lcorkscrew
+		CFLAGS += -DLIBCORKSCREW
+	endif
+endif
+SO_LIBS += -Wl,-Bdynamic
+APP_LIBS += -Wl,-Bdynamic
 ifdef ANDROID
-#SO_LIBS += -llog
+SO_LIBS += -llog
+APP_LIBS += -llog
 else
 SO_LIBS += -lpthread -llzma
 APP_LIBS += -lpthread
@@ -55,7 +71,7 @@ libload.so: load.o
 	$(CC) $(CFLAGS) -o $@ $^ $(SO_LIBS) -shared -Wl,--exclude-libs=ALL
 
 testapp: libopro.a libload.so testapp.o 
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(APP_LIBS) -lopro -lload -L. -Wl,-rpath=.
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(APP_LIBS) -L. -Wl,-rpath=.
 
 install: libopro.a libopro.so
 	mkdir -p $(libdir)

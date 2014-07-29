@@ -62,7 +62,7 @@ void main()
         // opro start
         opro_test_unwind();
         opro_ignore_address(load_wob_address_get);
-        opro_start("libload.so");
+        opro_start("libload.so", 10);
         printf("opro_start()'ed\n");
         // setup CTRL-C handler
         signal(SIGINT, kill_test);
