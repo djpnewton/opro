@@ -106,7 +106,7 @@ __attribute__((always_inline)) static int init_unwind(unw_context_t* ctx, unw_cu
 static void test_unwind()
 {
     PRINTF("test unwind...\n");
-#ifdef LIBUNWIND
+#if defined(LIBUNWIND)
     // initialize libunwind
     unw_context_t ctx;
     unw_cursor_t cursor;
@@ -121,7 +121,7 @@ static void test_unwind()
             PRINTF("    ip = %08lx, sp = %08lx\n", (long) ip, (long) sp);
         }
     }
-#elif LIBCORKSCREW
+#elif defined(LIBCORKSCREW)
     backtrace_frame_t frames[10];
     ssize_t count = unwind_backtrace(frames, 0, 10);
     PRINTF("  %d frames\n", count);
@@ -184,7 +184,7 @@ __attribute__((never_inline)) static void profile_action(int sig, siginfo_t* inf
     }
 
 #define FRAME_MAX 10
-#ifdef LIBUNWIND
+#if defined(LIBUNWIND)
     // initialize libunwind
     unw_context_t ctx;
     unw_cursor_t cursor;
@@ -214,12 +214,24 @@ __attribute__((never_inline)) static void profile_action(int sig, siginfo_t* inf
         if (!in_image)
             profile_counter_other++;
     }
-#elif LIBCORKSCREW
+#elif defined(LIBCORKSCREW)
     backtrace_frame_t frames[FRAME_MAX];
     // ignore this function and sigaction() entries in backtrace
     ssize_t count = unwind_backtrace(frames, 2, FRAME_MAX);
+    int in_image = 0;
     for (i = 0; i < count; i++)
-        PRINTF("    ip = %08lx\n", (long)frames[i].absolute_pc);
+    {
+        uint64_t ip = (uint64_t)frames[i].absolute_pc;
+        PRINTF("    ip = %08lx\n", (long)ip);
+        if (ip >= image_mm.start && ip <= image_mm.end && !is_ignored_addr(ip))
+        {
+            profile_counter_image++;
+            in_image = 1;
+            break;
+        }
+    }
+    if (!in_image)
+        profile_counter_other++;
 #else
     void* bt[FRAME_MAX];
     int count = backtrace(bt, FRAME_MAX);

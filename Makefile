@@ -7,7 +7,7 @@ bindir = $(prefix)/bin
 libdir = $(prefix)/lib
 incdir = $(prefix)/include
 
-LIBUNWIND = 
+LIBUNWIND =
 LIBCORKSCREW = 1
 ANDROID = 1
 X86 = 
@@ -35,17 +35,17 @@ SRC = $(wildcard *.c)
 OBJ = $(SRC:.c=.o)
 
 SO_LIBS =
-APP_LIBS = -Wl,-Bstatic -lopro -Wl,-Bdynamic -lload 
+APP_LIBS = libopro.a libload.so
 ifdef LIBUNWIND
 	SO_LIBS += -Wl,-Bstatic -lunwind
 	APP_LIBS += -Wl,-Bstatic -lunwind
 	CFLAGS += -DLIBUNWIND
 else
-	ifdef LIBCORKSCREW
-		SO_LIBS += -Wl,-Bstatic -lcorkscrew
-		APP_LIBS += -Wl,-Bstatic -lcorkscrew
-		CFLAGS += -DLIBCORKSCREW
-	endif
+ifdef LIBCORKSCREW
+	SO_LIBS += -Wl,-Bstatic -lcorkscrew
+	APP_LIBS += -Wl,-Bstatic -lcorkscrew
+	CFLAGS += -DLIBCORKSCREW
+endif
 endif
 SO_LIBS += -Wl,-Bdynamic
 APP_LIBS += -Wl,-Bdynamic
