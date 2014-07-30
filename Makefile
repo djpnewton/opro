@@ -29,7 +29,7 @@ endif
 AR = $(TOOLCHAIN_PREFIX)ar
 CC = $(TOOLCHAIN_PREFIX)gcc
 CXX = $(TOOLCHAIN_PREFIX)g++
-CFLAGS += -g -O0 -fPIC -fvisibility=hidden
+CFLAGS += -g -O0 -fPIC -fvisibility=hidden -funwind-tables -Wl,--no-merge-exidx-entries
 
 SRC = $(wildcard *.c)
 OBJ = $(SRC:.c=.o)

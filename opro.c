@@ -11,6 +11,7 @@
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <dirent.h>
+#include <dlfcn.h>
 
 #ifdef LIBUNWIND
 #define UNW_LOCAL_ONLY
@@ -78,7 +79,7 @@ static int is_ignored_addr(uint64_t addr)
         if (addr >= (uint64_t)ignored_addresses[i] - THRESHOLD &&
                 addr <= (uint64_t)ignored_addresses[i] + THRESHOLD)
         {
-            PRINTF("ignoring addr: %p\n", addr);
+            //PRINTF("ignoring addr: %p\n", addr);
             return 1;
         }
     return 0;
@@ -100,6 +101,50 @@ __attribute__((always_inline)) static int init_unwind(unw_context_t* ctx, unw_cu
         return 0;
     }
     return 1;
+}
+#endif
+
+#ifdef LIBCORKSCREW
+static ssize_t unwind_backtrace_dyn(siginfo_t* siginfo, void* sigcontext, backtrace_frame_t* frames, size_t ignore_depth, size_t max_depth)
+{
+    typedef ssize_t (*unwind_backtrace_t)(backtrace_frame_t*, size_t, size_t);
+    typedef ssize_t (*unwind_backtrace_signal_arch_t)(siginfo_t*, void*, const map_info_t*, backtrace_frame_t*, size_t, size_t);
+    typedef map_info_t* (*acquire_my_map_info_list_t)();
+    typedef void (*release_my_map_info_list_t)(map_info_t*);
+    void* libcorkscrew = dlopen("libcorkscrew.so", RTLD_LAZY | RTLD_LOCAL);
+    if (libcorkscrew != NULL)
+    {
+        ssize_t count;
+        unwind_backtrace_signal_arch_t unwind_backtrace_signal_arch = (unwind_backtrace_signal_arch_t)dlsym(libcorkscrew, "unwind_backtrace_signal_arch");
+        acquire_my_map_info_list_t acquire_my_map_info_list = (acquire_my_map_info_list_t)dlsym(libcorkscrew, "acquire_my_map_info_list");
+        release_my_map_info_list_t release_my_map_info_list = (release_my_map_info_list_t)dlsym(libcorkscrew, "release_my_map_info_list");
+        if (unwind_backtrace_signal_arch && acquire_my_map_info_list && release_my_map_info_list)
+        {
+            map_info_t* info = acquire_my_map_info_list();
+            count = unwind_backtrace_signal_arch(siginfo, sigcontext, info, frames, ignore_depth, max_depth);
+            release_my_map_info_list(info);
+        }
+        else
+        {
+            PRINTF("ERROR: symbol not found in libcorkscrew.so\n");
+            count = -1;
+        }
+        dlclose(libcorkscrew);
+        return count;
+    }
+    else
+        PRINTF("ERROR: libcorkscrew.so could not be loaded\n");
+    return -1;
+}
+#endif
+
+#ifdef LIBCORKSCREW
+static ssize_t unwind_backtrace_helper(siginfo_t* siginfo, void* sigcontext, backtrace_frame_t* frames, size_t ignore_depth, size_t max_depth)
+{
+    map_info_t* info = acquire_my_map_info_list();
+    ssize_t size = unwind_backtrace_signal_arch(siginfo, sigcontext, info, frames, ignore_depth, max_depth);
+    release_my_map_info_list(info);
+    return size;
 }
 #endif
 
@@ -216,13 +261,16 @@ __attribute__((never_inline)) static void profile_action(int sig, siginfo_t* inf
     }
 #elif defined(LIBCORKSCREW)
     backtrace_frame_t frames[FRAME_MAX];
+    backtrace_symbol_t symbols[FRAME_MAX];
     // ignore this function and sigaction() entries in backtrace
-    ssize_t count = unwind_backtrace(frames, 2, FRAME_MAX);
+    ssize_t count = unwind_backtrace_helper(info, context, frames, 0, FRAME_MAX);
+    get_backtrace_symbols(frames, count, symbols);
+    //PRINTF("  frames: %d, tid: %d\n", count, tid);
     int in_image = 0;
     for (i = 0; i < count; i++)
     {
         uint64_t ip = (uint64_t)frames[i].absolute_pc;
-        PRINTF("    ip = %08lx\n", (long)ip);
+        //PRINTF("    ip = %08lx, %s, %s\n", (long)ip, symbols[i].symbol_name, symbols[i].map_name);
         if (ip >= image_mm.start && ip <= image_mm.end && !is_ignored_addr(ip))
         {
             profile_counter_image++;
@@ -526,7 +574,7 @@ PUBLIC int opro_stop()
     }
     PRINTF("total: %d\n", total);
     PRINTF("\n\n");
-    PRINTF("profile_counter_image: %d\n", profile_counter_image);
+    PRINTF("profile_counter_image: %d (%d%%)\n", profile_counter_image, (int)((float)profile_counter_image / (profile_counter_image + profile_counter_other) * 100));
     PRINTF("profile_counter_other: %d\n", profile_counter_other);
     PRINTF("total:                 %d\n", profile_counter_image + profile_counter_other);
     return OPRO_SUCCESS;
