@@ -33,14 +33,17 @@ void work_lazy(void* arg)
         rate_limit(100);
 }
 
+int gt;
 void work(void* arg)
 {
     while (!finish)
     {
         // do some work
         int i;
-        for (i = 0; i < 100; i++)
-            free(malloc(0x1000));
+        int t = 0;
+        for (i = 0; i < 1000000; i++)
+            t += i;
+        gt = t;
         // rate limit
         rate_limit(10);
     }
