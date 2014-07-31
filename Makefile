@@ -29,7 +29,7 @@ endif
 AR = $(TOOLCHAIN_PREFIX)ar
 CC = $(TOOLCHAIN_PREFIX)gcc
 CXX = $(TOOLCHAIN_PREFIX)g++
-CFLAGS += -g -O0 -fPIC -fvisibility=hidden -funwind-tables -Wl,--no-merge-exidx-entries
+CFLAGS += -g -O0 -fPIC -fvisibility=hidden
 
 SRC = $(wildcard *.c)
 OBJ = $(SRC:.c=.o)
@@ -37,8 +37,8 @@ OBJ = $(SRC:.c=.o)
 SO_LIBS =
 APP_LIBS = libopro.a libload.so
 ifdef LIBUNWIND
-	SO_LIBS += -Wl,-Bstatic -lunwind
-	APP_LIBS += -Wl,-Bstatic -lunwind
+	SO_LIBS += -Wl,-Bstatic -lunwind-ptrace -lunwind-generic -lunwind
+	APP_LIBS += -Wl,-Bstatic -lunwind-ptrace -lunwind-generic -lunwind
 	CFLAGS += -DLIBUNWIND
 else
 ifdef LIBCORKSCREW
@@ -54,7 +54,7 @@ SO_LIBS += -llog
 APP_LIBS += -llog
 else
 SO_LIBS += -lpthread -llzma
-APP_LIBS += -lpthread
+APP_LIBS += -lpthread -llzma
 endif
 
 

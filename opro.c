@@ -7,25 +7,23 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
-//#include <ucontext.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <unistd.h>
 
 #ifdef LIBUNWIND
-#define UNW_LOCAL_ONLY
-#include <libunwind.h>
+#include <libunwind-ptrace.h>
 #endif
 #ifdef LIBCORKSCREW
 #include <corkscrew/backtrace.h>
 #endif
 
-#include "opro.h"
+#include <sys/ptrace.h>
 
-#ifdef ANDROID
-#include <android/log.h>
-#endif
+#include "opro.h"
 
 #define PUBLIC __attribute__ ((visibility ("default")))
 
@@ -37,7 +35,8 @@ struct mm_t
 	uint64_t start, end;
 };
 
-static int finish = 0;
+static pid_t gpid;
+static int finish;
 static pthread_t t;
 #define MAX_THREAD_SAMPLE_LOGS 50
 struct thread_sample_t
@@ -50,25 +49,35 @@ static struct mm_t image_mm;
 static int profile_counter_image = 0;
 static int profile_counter_other = 0;
 static int sample_rate = 10;
-static pthread_mutex_t lock;
 
 #define MAX_IGNORED_ADDRESSES 100
 static int num_ignored_addresses = 0;
 static void* ignored_addresses[MAX_IGNORED_ADDRESSES];
 
-#ifdef ANDROID
-#define PRINTF(...) __android_log_print(ANDROID_LOG_INFO, "PROFILING", __VA_ARGS__)
-#else
 #define PRINTF(...) printf(__VA_ARGS__)
-#endif
 
 static void print_error(const char* msg)
 {
-#ifdef ANDROID
-    __android_log_print(ANDROID_LOG_INFO, "PROFILING", "ERROR: %s", msg);
-#else
     perror(msg);
-#endif
+}
+
+static void print_result()
+{
+    PRINTF("\n\n");
+    int i;
+    int total = 0;
+    for (i = 0; i < MAX_THREAD_SAMPLE_LOGS; i++)
+    {
+        if (thread_samples[i].tid == 0)
+            break;
+        PRINTF("thread %02d: %d\tsample count: %d\n", i, thread_samples[i].tid, thread_samples[i].sample_count);
+        total += thread_samples[i].sample_count;
+    }
+    PRINTF("total: %d\n", total);
+    PRINTF("\n\n");
+    PRINTF("profile_counter_image: %d (%d%%)\n", profile_counter_image, (int)((float)profile_counter_image / (profile_counter_image + profile_counter_other) * 100));
+    PRINTF("profile_counter_other: %d\n", profile_counter_other);
+    PRINTF("total:                 %d\n", profile_counter_image + profile_counter_other);
 }
 
 static int is_ignored_addr(uint64_t addr)
@@ -85,237 +94,12 @@ static int is_ignored_addr(uint64_t addr)
     return 0;
 }
 
-#ifdef LIBUNWIND
-__attribute__((always_inline)) static int init_unwind(unw_context_t* ctx, unw_cursor_t* cursor)
-{
-    int res = unw_getcontext(ctx);
-    if (res != 0)
-    {
-        print_error("unw_init_local failed");
-        return 0;
-    }
-    res = unw_init_local(cursor, ctx);
-    if (res != 0)
-    {
-        print_error("unw_getcontext failed");
-        return 0;
-    }
-    return 1;
-}
-#endif
-
-#ifdef LIBCORKSCREW
-static ssize_t unwind_backtrace_dyn(siginfo_t* siginfo, void* sigcontext, backtrace_frame_t* frames, size_t ignore_depth, size_t max_depth)
-{
-    typedef ssize_t (*unwind_backtrace_t)(backtrace_frame_t*, size_t, size_t);
-    typedef ssize_t (*unwind_backtrace_signal_arch_t)(siginfo_t*, void*, const map_info_t*, backtrace_frame_t*, size_t, size_t);
-    typedef map_info_t* (*acquire_my_map_info_list_t)();
-    typedef void (*release_my_map_info_list_t)(map_info_t*);
-    void* libcorkscrew = dlopen("libcorkscrew.so", RTLD_LAZY | RTLD_LOCAL);
-    if (libcorkscrew != NULL)
-    {
-        ssize_t count;
-        unwind_backtrace_signal_arch_t unwind_backtrace_signal_arch = (unwind_backtrace_signal_arch_t)dlsym(libcorkscrew, "unwind_backtrace_signal_arch");
-        acquire_my_map_info_list_t acquire_my_map_info_list = (acquire_my_map_info_list_t)dlsym(libcorkscrew, "acquire_my_map_info_list");
-        release_my_map_info_list_t release_my_map_info_list = (release_my_map_info_list_t)dlsym(libcorkscrew, "release_my_map_info_list");
-        if (unwind_backtrace_signal_arch && acquire_my_map_info_list && release_my_map_info_list)
-        {
-            map_info_t* info = acquire_my_map_info_list();
-            count = unwind_backtrace_signal_arch(siginfo, sigcontext, info, frames, ignore_depth, max_depth);
-            release_my_map_info_list(info);
-        }
-        else
-        {
-            PRINTF("ERROR: symbol not found in libcorkscrew.so\n");
-            count = -1;
-        }
-        dlclose(libcorkscrew);
-        return count;
-    }
-    else
-        PRINTF("ERROR: libcorkscrew.so could not be loaded\n");
-    return -1;
-}
-#endif
-
-#ifdef LIBCORKSCREW
-static ssize_t unwind_backtrace_helper(siginfo_t* siginfo, void* sigcontext, backtrace_frame_t* frames, size_t ignore_depth, size_t max_depth)
-{
-    map_info_t* info = acquire_my_map_info_list();
-    ssize_t size = unwind_backtrace_signal_arch(siginfo, sigcontext, info, frames, ignore_depth, max_depth);
-    release_my_map_info_list(info);
-    return size;
-}
-#endif
-
-static void test_unwind()
-{
-    PRINTF("test unwind...\n");
-#if defined(LIBUNWIND)
-    // initialize libunwind
-    unw_context_t ctx;
-    unw_cursor_t cursor;
-    if (init_unwind(&ctx, &cursor))
-    {
-        PRINTF("  unw_step()...\n");
-        while (unw_step(&cursor) > 0)
-        {
-            unw_word_t ip, sp;
-            unw_get_reg(&cursor, UNW_REG_IP, &ip);
-            unw_get_reg(&cursor, UNW_REG_SP, &sp);
-            PRINTF("    ip = %08lx, sp = %08lx\n", (long) ip, (long) sp);
-        }
-    }
-#elif defined(LIBCORKSCREW)
-    backtrace_frame_t frames[10];
-    ssize_t count = unwind_backtrace(frames, 0, 10);
-    PRINTF("  %d frames\n", count);
-    int i;
-    for (i = 0; i < count; i++)
-        PRINTF("    ip = %08lx\n", (long)frames[i].absolute_pc);
-#else
-    void* bt[10];
-    int count = backtrace(bt, 10);
-    int i;
-    for (i = 0; i < count; i++)
-        PRINTF("    ip = %08lx\n", (long)bt[i]);
-#endif
-}
-
 #ifndef ANDROID
 pid_t gettid()
 {
     return syscall(SYS_gettid);
 }
 #endif
-
-__attribute__((never_inline)) static void profile_action(int sig, siginfo_t* info, void* context)
-{
-    pthread_mutex_lock(&lock);
-/*
-    ucontext_t* ucontext = (ucontext_t*)context;
-    mcontext_t* mcontext = &ucontext->uc_mcontext;
-#if defined(__amd64)
-#define REG_PC 16
-#define TASK_SIZE 0xffff880000000000
-#elif defined(__i386)
-#define REG_PC 13
-#define TASK_SIZE 0xc0000000
-#else
-#error ("cpu not supported")
-#endif
-    uint64_t pc = mcontext->gregs[REG_PC];
-    if (pc <= TASK_SIZE)
-        PRINTF("profile_action tid: %d, pc: 0x%"PRIx64"\n", (int)syscall(SYS_gettid), pc);
-*/
-
-    // update thread sample count
-    int i;
-    pid_t tid = gettid();
-    //PRINTF("profile_action() tid: %d\n", tid);
-    for (i = 0; i < MAX_THREAD_SAMPLE_LOGS; i++)
-    {
-        if (thread_samples[i].tid == 0)
-        {
-            thread_samples[i].tid = tid;
-            thread_samples[i].sample_count++;
-            break;
-        }
-        else if (thread_samples[i].tid == tid)
-        {
-            thread_samples[i].sample_count++;
-            break;
-        }
-    }
-
-#define FRAME_MAX 10
-#if defined(LIBUNWIND)
-    // initialize libunwind
-    unw_context_t ctx;
-    unw_cursor_t cursor;
-    if (init_unwind(&ctx, &cursor))
-    {
-        // search calls from our image code
-        i = 0;
-        int in_image = 0;
-        while (unw_step(&cursor) > 0 && i < FRAME_MAX)
-        {
-            // ignore this function and sigaction() entries in backtrace
-            if (i > 1)
-            {
-                unw_word_t ip, sp;
-                unw_get_reg(&cursor, UNW_REG_IP, &ip);
-                unw_get_reg(&cursor, UNW_REG_SP, &sp);
-                //PRINTF("i = %d, ip = %016lx, sp = %016lx\n", i, (long) ip, (long) sp);
-                if (ip >= image_mm.start && ip <= image_mm.end && !is_ignored_addr(ip))
-                {
-                    profile_counter_image++;
-                    in_image = 1;
-                    break;
-                }
-            }
-            i++;
-        }
-        if (!in_image)
-            profile_counter_other++;
-    }
-#elif defined(LIBCORKSCREW)
-    backtrace_frame_t frames[FRAME_MAX];
-    backtrace_symbol_t symbols[FRAME_MAX];
-    // ignore this function and sigaction() entries in backtrace
-    ssize_t count = unwind_backtrace_helper(info, context, frames, 0, FRAME_MAX);
-    get_backtrace_symbols(frames, count, symbols);
-    //PRINTF("  frames: %d, tid: %d\n", count, tid);
-    int in_image = 0;
-    for (i = 0; i < count; i++)
-    {
-        uint64_t ip = (uint64_t)frames[i].absolute_pc;
-        //PRINTF("    ip = %08lx, %s, %s\n", (long)ip, symbols[i].symbol_name, symbols[i].map_name);
-        if (ip >= image_mm.start && ip <= image_mm.end && !is_ignored_addr(ip))
-        {
-            profile_counter_image++;
-            in_image = 1;
-            break;
-        }
-    }
-    if (!in_image)
-        profile_counter_other++;
-#else
-    void* bt[FRAME_MAX];
-    int count = backtrace(bt, FRAME_MAX);
-    int in_image = 0;
-    for (i = 0; i < count; i++)
-    {
-        // ignore this function and sigaction() entries in backtrace
-        if (i > 1)
-        {
-            uint64_t ip = (uint64_t)bt[i];
-            PRINTF("i = %d, ip = %016lx\n", i, (long)ip);
-            if (ip >= image_mm.start && ip <= image_mm.end && !is_ignored_addr(ip))
-            {
-                profile_counter_image++;
-                in_image = 1;
-                break;
-            }
-        }
-    }
-    if (!in_image)
-        profile_counter_other++;
-#endif
-
-    pthread_mutex_unlock(&lock);
-}
-
-static void setup_profile_handler()
-{
-    struct sigaction action;
-    action.sa_flags = SA_SIGINFO | SA_RESTART;
-    action.sa_sigaction = profile_action;
-    sigemptyset(&action.sa_mask);
-    int res = sigaction(SIGPROF, &action, NULL);
-    if (res)
-        print_error("sigaction failed");
-}
 
 static int load_thread_list(pid_t pid, int ignore_sleeping, pid_t* threads, int threads_max, int* threads_count)
 {
@@ -347,7 +131,6 @@ static int load_thread_list(pid_t pid, int ignore_sleeping, pid_t* threads, int 
                     if (size > 0)
                     {
                         char state = *(strchr(data, ')') + 2);
-                        //PRINTF("thread: %s, state: %c\n", ent->d_name, state);
                         if (state != 'R')
                         {
                             ent = readdir(d);
@@ -381,6 +164,103 @@ static int tgkill(pid_t tgid, pid_t tid, int signalno)
     return syscall(SYS_tgkill, tgid, tid, signalno);
 }
 
+#ifdef LIBCORKSCREW
+static int sample_corkscrew(pid_t tid)
+{
+    ptrace_context_t* context = load_ptrace_context(tid);
+    if (!context)
+        perror("eeeeee!\n");
+#define MAX_FRAMES 10
+    backtrace_frame_t frames[MAX_FRAMES];
+    ssize_t count = unwind_backtrace_ptrace(tid, context, frames, 0, MAX_FRAMES);
+    if (count == -1)
+    {
+        perror("unwind_backtrace_ptrace failed");
+        return 0;
+    }
+    backtrace_symbol_t symbols[MAX_FRAMES];
+    get_backtrace_symbols_ptrace(context, frames, count, symbols);
+    int in_image = 0;
+    int i;
+    for (i = 0; i < count; i++)
+    {
+        uint64_t ip = (uint64_t)frames[i].absolute_pc;
+        printf("%d - ip: %p, %s, %s, %s\n", i, ip, symbols[i].map_name, symbols[i].symbol_name, symbols[i].demangled_name);
+        if (ip >= image_mm.start && ip <= image_mm.end && !is_ignored_addr(ip))
+        {
+            profile_counter_image++;
+            in_image = 1;
+            break;
+        }
+    }
+    if (!in_image)
+        profile_counter_other++;
+    free_ptrace_context(context);
+    return 1;
+}
+#endif
+
+#ifdef LIBUNWIND
+static int sample_unwind(pid_t tid)
+{
+    struct UPT_info* ui = _UPT_create(tid);
+    unw_cursor_t cursor;
+    unw_addr_space_t as = unw_create_addr_space(&_UPT_accessors, 0);
+    if (!as)
+    {
+        perror("unw_create_addr_space() failed");
+        return 0;
+    }
+    int res = unw_init_remote(&cursor, as, ui);
+    if (res < 0)
+    {
+        perror("unw_init_remote() failed");
+        unw_destroy_addr_space(as);
+        return 0;
+    }
+    int i = 0;
+    int in_image = 0;
+#define MAX_FRAMES 10
+    while (unw_step(&cursor) > 0 && i < MAX_FRAMES)
+    {
+        unw_word_t ip, sp;
+        unw_get_reg(&cursor, UNW_REG_IP, &ip);
+        unw_get_reg(&cursor, UNW_REG_SP, &sp);
+        //PRINTF("i = %d, ip = %016lx, sp = %016lx\n", i, (long) ip, (long) sp);
+        if (ip >= image_mm.start && ip <= image_mm.end && !is_ignored_addr(ip))
+        {
+            profile_counter_image++;
+            in_image = 1;
+            break;
+        }
+        i++;
+    }
+    if (!in_image)
+        profile_counter_other++;
+    unw_destroy_addr_space(as);
+    _UPT_destroy(ui);
+    return 1;
+}
+#endif
+
+const int sleep_time_usec = 50000;         /* 0.05 seconds */
+const int max_total_sleep_usec = 10000000; /* 10 seconds*/
+
+void wait_for_stop(pid_t tid, int* total_sleep_time_usec)
+{
+    siginfo_t si;
+    while (TEMP_FAILURE_RETRY(ptrace(PTRACE_GETSIGINFO, tid, 0, &si)) < 0 && errno == ESRCH)
+    {
+        if (*total_sleep_time_usec > max_total_sleep_usec)
+        {
+            printf("timed out waiting for tid=%d to stop\n", tid);
+            break;
+        }
+        usleep(sleep_time_usec);
+        *total_sleep_time_usec += sleep_time_usec;
+    }
+}
+
 static void profile_thread(void* arg)
 {   
     PRINTF("profile_thread() entry, tid: %d\n", gettid());
@@ -389,26 +269,50 @@ static void profile_thread(void* arg)
     int thread_count = 0;
     pid_t thread_list[MAX_THREAD_LIST];
 
-    setup_profile_handler();
-
-    pid_t tid = gettid();
-
     while (!finish)
     {
-        pid_t pid = getpid();
-
-        load_thread_list(pid, 1, thread_list, MAX_THREAD_LIST, &thread_count);
-        //PRINTF("thread count: %d\n", thread_count);
-
+        load_thread_list(gpid, 1, thread_list, MAX_THREAD_LIST, &thread_count);
+        printf("thread count: %d\n", thread_count);
         int i;
         for (i = 0; i < thread_count; i++)
         {
-            if (thread_list[i] != tid)
+            pid_t tid = thread_list[i];
+            // update thread sample count
+            int j;
+            for (j = 0; j < MAX_THREAD_SAMPLE_LOGS; j++)
             {
-                int res = tgkill(pid, thread_list[i], SIGPROF);
-                if (res)
-                    print_error("tgkill failed");
+                if (thread_samples[j].tid == 0)
+                {
+                    thread_samples[j].tid = tid;
+                    thread_samples[j].sample_count++;
+                    break;
+                }
+                else if (thread_samples[j].tid == tid)
+                {
+                    thread_samples[j].sample_count++;
+                    break;
+                }
             }
+            // attach to tid via ptrace
+            if (ptrace(PTRACE_ATTACH, tid, 0, 0))
+            {
+                perror("ptrace attach failed");
+                continue;
+            }
+            int total_sleep_time_usec = 0;
+            wait_for_stop(tid, &total_sleep_time_usec);
+#ifdef LIBCORKSCREW
+            if (!sample_corkscrew(tid))
+            {
+                print_result();
+                exit(-1);
+            }
+#endif
+#ifdef LIBUNWIND
+            sample_unwind(tid);
+#endif
+            // detatch from thread
+            ptrace(PTRACE_DETACH, tid, 0, 0);
         }
 
         const struct timespec t = {sample_rate / 1000, (sample_rate % 1000) * 1000000};
@@ -420,7 +324,7 @@ static unsigned int stack_start;
 static unsigned int stack_end;
 static int load_memmap(pid_t pid, struct mm_t *mm, int *nmmp)
 {
-	char raw[80000]; // this depends on the number of libraries an executable uses
+	char raw[180000]; // this depends on the number of libraries an executable uses
 	char name[MAX_NAME_LEN];
 	char *p;
 	unsigned long start, end;
@@ -444,7 +348,7 @@ static int load_memmap(pid_t pid, struct mm_t *mm, int *nmmp)
 	while (1) {
 		rv = read(fd, p, sizeof(raw)-(p-raw));
 		if (0 > rv) {
-			//print_error("read");
+			print_error("read");
 			return -1;
 		}
 		if (0 == rv)
@@ -515,9 +419,10 @@ struct mm_t* find_image(struct mm_t* mm, int mm_count, char* image_name)
     return NULL;
 }
 
-PUBLIC int opro_start(char* image_name, int sample_rate_ms)
+PUBLIC int opro_start(pid_t pid, char* image_name, int sample_rate_ms)
 {
     // clear globals
+    gpid = pid;
     finish = 0;
     memset(&thread_samples, 0, sizeof(thread_samples));
     memset(&image_mm, 0, sizeof(image_mm));
@@ -527,7 +432,7 @@ PUBLIC int opro_start(char* image_name, int sample_rate_ms)
     // continue initialization
     struct mm_t mm[1000];
     int nmm;
-    if (load_memmap(getpid(), mm, &nmm))
+    if (load_memmap(pid, mm, &nmm))
     {
         PRINTF("error: cant load memory map\n");
         return OPRO_FAILURE;
@@ -540,13 +445,7 @@ PUBLIC int opro_start(char* image_name, int sample_rate_ms)
     }
     image_mm = *imm;
     PRINTF("profiling image: %s, 0x%"PRIx64"-0x%"PRIx64"\n", imm->name, imm->start, imm->end);
-    int res = pthread_mutex_init(&lock, NULL);
-    if (res)
-    {
-        print_error("pthread_mutex_init failed");
-        return OPRO_FAILURE;
-    }
-    res = pthread_create(&t, NULL, (void*)&profile_thread, NULL);
+    int res = pthread_create(&t, NULL, (void*)&profile_thread, NULL);
     if (res)
     {
         print_error("pthread_create failed");
@@ -560,23 +459,8 @@ PUBLIC int opro_stop()
     // stop sampling
     finish = 1;
     pthread_join(t, NULL);
-    pthread_mutex_destroy(&lock);
     // print profile result
-    PRINTF("\n\n");
-    int i;
-    int total = 0;
-    for (i = 0; i < MAX_THREAD_SAMPLE_LOGS; i++)
-    {
-        if (thread_samples[i].tid == 0)
-            break;
-        PRINTF("thread %02d: %d\tsample count: %d\n", i, thread_samples[i].tid, thread_samples[i].sample_count);
-        total += thread_samples[i].sample_count;
-    }
-    PRINTF("total: %d\n", total);
-    PRINTF("\n\n");
-    PRINTF("profile_counter_image: %d (%d%%)\n", profile_counter_image, (int)((float)profile_counter_image / (profile_counter_image + profile_counter_other) * 100));
-    PRINTF("profile_counter_other: %d\n", profile_counter_other);
-    PRINTF("total:                 %d\n", profile_counter_image + profile_counter_other);
+    print_result();
     return OPRO_SUCCESS;
 }
 
@@ -603,5 +487,4 @@ PUBLIC int opro_ignored_addresses_clear()
 
 PUBLIC void opro_test_unwind()
 {
-    test_unwind();
 }
