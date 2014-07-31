@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <inttypes.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -13,6 +14,8 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #ifdef LIBUNWIND
 #include <libunwind-ptrace.h>
@@ -36,8 +39,8 @@ struct mm_t
 };
 
 static pid_t gpid;
-static int finish;
-static pthread_t t;
+static int finish_profiling, finish_serving;
+static pthread_t pt_prof, pt_serve;
 #define MAX_THREAD_SAMPLE_LOGS 50
 struct thread_sample_t
 {
@@ -51,8 +54,12 @@ static int profile_counter_other = 0;
 static int sample_rate = 10;
 
 #define MAX_IGNORED_ADDRESSES 100
-static int num_ignored_addresses = 0;
-static void* ignored_addresses[MAX_IGNORED_ADDRESSES];
+struct ignored_addresses_t
+{
+    int count;
+    uint64_t addr[MAX_IGNORED_ADDRESSES];
+};
+static struct ignored_addresses_t ignored_addr = {};
 
 #define PRINTF(...) printf(__VA_ARGS__)
 
@@ -84,9 +91,9 @@ static int is_ignored_addr(uint64_t addr)
 {
 #define THRESHOLD 15
     int i;
-    for (i = 0; i < num_ignored_addresses; i++)
-        if (addr >= (uint64_t)ignored_addresses[i] - THRESHOLD &&
-                addr <= (uint64_t)ignored_addresses[i] + THRESHOLD)
+    for (i = 0; i < ignored_addr.count; i++)
+        if (addr >= ignored_addr.addr[i] - THRESHOLD &&
+                addr <= ignored_addr.addr[i] + THRESHOLD)
         {
             //PRINTF("ignoring addr: %p\n", addr);
             return 1;
@@ -269,7 +276,7 @@ static void profile_thread(void* arg)
     int thread_count = 0;
     pid_t thread_list[MAX_THREAD_LIST];
 
-    while (!finish)
+    while (!finish_profiling)
     {
         load_thread_list(gpid, 1, thread_list, MAX_THREAD_LIST, &thread_count);
         printf("thread count: %d\n", thread_count);
@@ -423,7 +430,7 @@ PUBLIC int opro_start(pid_t pid, char* image_name, int sample_rate_ms)
 {
     // clear globals
     gpid = pid;
-    finish = 0;
+    finish_profiling = 0;
     memset(&thread_samples, 0, sizeof(thread_samples));
     memset(&image_mm, 0, sizeof(image_mm));
     profile_counter_image = 0;
@@ -445,7 +452,7 @@ PUBLIC int opro_start(pid_t pid, char* image_name, int sample_rate_ms)
     }
     image_mm = *imm;
     PRINTF("profiling image: %s, 0x%"PRIx64"-0x%"PRIx64"\n", imm->name, imm->start, imm->end);
-    int res = pthread_create(&t, NULL, (void*)&profile_thread, NULL);
+    int res = pthread_create(&pt_prof, NULL, (void*)&profile_thread, NULL);
     if (res)
     {
         print_error("pthread_create failed");
@@ -457,8 +464,8 @@ PUBLIC int opro_start(pid_t pid, char* image_name, int sample_rate_ms)
 PUBLIC int opro_stop()
 {
     // stop sampling
-    finish = 1;
-    pthread_join(t, NULL);
+    finish_profiling = 1;
+    pthread_join(pt_prof, NULL);
     // print profile result
     print_result();
     return OPRO_SUCCESS;
@@ -466,11 +473,11 @@ PUBLIC int opro_stop()
 
 PUBLIC int opro_ignore_address(void* address)
 {
-    if (num_ignored_addresses < MAX_IGNORED_ADDRESSES)
+    if (ignored_addr.count < MAX_IGNORED_ADDRESSES)
     {
         //PRINTF("ignoring %p\n", address);
-        ignored_addresses[num_ignored_addresses] = address;
-        num_ignored_addresses++;
+        ignored_addr.addr[ignored_addr.count] = (uint64_t)address;
+        ignored_addr.count++;
         return OPRO_SUCCESS;
     }
     else
@@ -482,9 +489,132 @@ PUBLIC int opro_ignore_address(void* address)
 
 PUBLIC int opro_ignored_addresses_clear()
 {
-    num_ignored_addresses = 0;
+    ignored_addr.count = 0;
 }
 
-PUBLIC void opro_test_unwind()
+static int make_addr(const char* name, struct sockaddr_un* addr, socklen_t* socklen)
 {
+    // create a UNIX-domain socket address in the Linux abstract namespace
+    int name_len = strlen(name);
+    if (name_len >= (int) sizeof(addr->sun_path) - 1)
+        return 0;
+    addr->sun_path[0] = '\0';
+    strcpy(addr->sun_path + 1, name);
+    addr->sun_family = AF_LOCAL;
+    *socklen = offsetof(struct sockaddr_un, sun_path) + name_len + 1;
+    return 1;
+}
+
+static char* socket_name(pid_t pid)
+{
+#define LEN 100
+    static char name[LEN];
+    snprintf(name, LEN, "opro_ignored_addreses_%d", pid);
+    return name;
+}
+
+static void serve_addresses(void* arg)
+{
+    pid_t pid = *((pid_t*)arg);
+    struct sockaddr_un sockaddr = {};
+    socklen_t socklen;
+    char* name = socket_name(pid);
+    if (!make_addr(name, &sockaddr, &socklen))
+    {
+        printf("make_addr() failed\n");
+        return;
+    }
+    printf("SERVER %s\n", sockaddr.sun_path + 1);
+    int fd = socket(AF_LOCAL, SOCK_STREAM, PF_UNIX);
+    if (fd < 0)
+    {
+        perror("socket()");
+        return;
+    }
+    if (bind(fd, (const struct sockaddr*) &sockaddr, socklen) < 0)
+    {
+        perror("bind()");
+        goto cleanup;
+    }
+    if (listen(fd, 5) < 0)
+    {
+        perror("listen()");
+        goto cleanup;
+    }
+    while (!finish_serving)
+    {
+        int client_sock = accept(fd, NULL, NULL);
+        if (client_sock < 0)
+        {
+            perror("accept");
+            break;
+        }
+        int count = write(client_sock, &ignored_addr, sizeof(ignored_addr));
+        close(client_sock);
+        if (count < 0)
+        {
+            perror("write");
+            break;
+        }
+    }
+cleanup:
+    close(fd);
+}
+
+PUBLIC int opro_ignored_addresses_serve(pid_t pid)
+{
+    static pid_t p;
+    p = pid;
+    PRINTF("serving ignored addresses\n");
+    int res = pthread_create(&pt_serve, NULL, (void*)&serve_addresses, &p);
+    if (res)
+    {
+        print_error("pthread_create failed");
+        return OPRO_FAILURE;
+    }
+    return OPRO_SUCCESS;
+}
+
+PUBLIC int opro_ignored_addresses_serve_cancel()
+{
+    // stop serving
+    finish_serving = 1;
+    pthread_join(pt_serve, NULL);
+    return OPRO_SUCCESS;
+}
+
+PUBLIC int opro_ignored_addresses_read(pid_t pid)
+{
+    int res = OPRO_FAILURE;
+    opro_ignored_addresses_clear();
+    struct sockaddr_un sockaddr;
+    socklen_t socklen;
+    char* name = socket_name(pid);
+    if (!make_addr(name, &sockaddr, &socklen))
+    {
+        printf("make_addr() failed\n");
+        return;
+    }
+    printf("CLIENT %s\n", sockaddr.sun_path + 1);
+    int fd = socket(AF_LOCAL, SOCK_STREAM, PF_UNIX);
+    if (fd < 0)
+    {
+        perror("socket()");
+        return;
+    }
+    if (connect(fd, (const struct sockaddr*) &sockaddr, socklen) < 0)
+    {
+        perror("connect()");
+        goto cleanup;
+    }
+    if (read(fd, &ignored_addr, sizeof(ignored_addr)) < 0)
+    {
+        perror("read()");
+        goto cleanup;
+    }
+    printf("ignored_addr.count: %d\n", ignored_addr.count);
+    res = OPRO_SUCCESS;
+cleanup:
+    close(fd);
+    return res;
 }

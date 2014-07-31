@@ -13,7 +13,9 @@ int opro_start(pid_t pid, char* image_name, int sample_rate_ms);
 int opro_stop();
 int opro_ignore_address(void* address);
 int opro_ignored_addresses_clear(void);
-void opro_test_unwind(void);
+int opro_ignored_addresses_serve(pid_t pid);
+int opro_ignored_addresses_serve_cancel(void);
+int opro_ignored_addresses_read(pid_t pid);
 #ifdef __cplusplus
 }
 #endif

@@ -23,6 +23,7 @@ ifdef ANDROID
 		CFLAGS += -I$(NDK_TOOLCHAIN)/user/include
 		CFLAGS += -L$(NDK_TOOLCHAIN)/user/lib
 		CFLAGS += -DANDROID
+		CFLAGS += -funwind-tables -Wl,--no-merge-exidx-entries
 	endif
 endif
 

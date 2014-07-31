@@ -68,6 +68,8 @@ void main(int argc, char** argv)
         // setup CTRL-C handler
         signal(SIGINT, kill_test);
 
+        if (opro_ignored_addresses_read(pid) == OPRO_FAILURE)
+            return;
         opro_start(pid, argv[1], 10);
         printf("wait..\n");
         while (!finish)
@@ -84,6 +86,9 @@ void main(int argc, char** argv)
             printf("main() entry, pid: %d\n", getpid());
             // setup CTRL-C handler
             signal(SIGINT, kill_test);
+            // setup ignored address
+            opro_ignore_address(load_wob_address_get());
+            opro_ignored_addresses_serve(getpid());
             // do work in libload.so
             printf("load_work()\n");
             load_work(work, NUM_THREADS, threads);
@@ -95,6 +100,8 @@ void main(int argc, char** argv)
             printf("wait..\n");
             while (!finish)
                 sleep(1);
+            // stop serving ignored addresses
+            opro_ignored_addresses_serve_cancel();
         }
         else if (pid > 0)
         {
