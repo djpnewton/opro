@@ -24,6 +24,9 @@ void main(int argc, char** argv)
 
         // setup CTRL-C handler
         signal(SIGINT, _kill);
+        // and others
+        signal(SIGTERM, _kill);
+        signal(SIGKILL, _kill);
 
         if (opro_ignored_addresses_read(pid) == OPRO_FAILURE)
             return;
