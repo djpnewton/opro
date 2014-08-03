@@ -4,11 +4,12 @@ set -e
 
 DIR=/data/dan
 
-echo "MAKE testapp..."
-make testapp
+echo "MAKE opro & testapp..."
+make opro testapp
 
 echo "PUSH testapp..."
 adb push libload.so $DIR
+adb push opro $DIR
 adb push testapp $DIR
 
 echo "CREATE testapp.sh..."

@@ -7,7 +7,6 @@
 #include <signal.h>
 #include <time.h>
 
-#include "opro.h"
 #include "load.h"
 
 int finish = 0;
@@ -58,55 +57,34 @@ void kill_test(int sig)
 
 void main(int argc, char** argv)
 {
-    if (argc == 3)
+    printf("WORKER!\n");
+
+    pid_t pid = fork();
+    if (pid == 0)
     {
-        pid_t pid;
-        sscanf(argv[2], "%d", &pid);
-
-        printf("PROFILER (monitoring pid - %d)!\n", pid);
-
+        printf("main() entry, pid: %d\n", getpid());
         // setup CTRL-C handler
         signal(SIGINT, kill_test);
-
-        if (opro_ignored_addresses_read(pid) == OPRO_FAILURE)
-            return;
-        opro_start(pid, argv[1], 10);
+        // setup ignored address
+        opro_ignore_address(load_wob_address_get());
+        opro_ignored_addresses_serve(getpid());
+        // do work in libload.so
+        printf("load_work()\n");
+        load_work(work, NUM_THREADS, threads);
+        load_work(work_lazy, NUM_THREADS, threads_lazy);
+        // do work via work_on_behalf function
+        printf("load_work_on_behalf()\n");
+        load_work_on_behalf(work, NUM_THREADS, threads_wob);
+        // wait
         printf("wait..\n");
         while (!finish)
             sleep(1);
-        opro_stop();
+        // stop serving ignored addresses
+        opro_ignored_addresses_serve_cancel();
     }
-    else
+    else if (pid > 0)
     {
-        printf("WORKER!\n");
-
-        pid_t pid = fork();
-        if (pid == 0)
-        {
-            printf("main() entry, pid: %d\n", getpid());
-            // setup CTRL-C handler
-            signal(SIGINT, kill_test);
-            // setup ignored address
-            opro_ignore_address(load_wob_address_get());
-            opro_ignored_addresses_serve(getpid());
-            // do work in libload.so
-            printf("load_work()\n");
-            load_work(work, NUM_THREADS, threads);
-            load_work(work_lazy, NUM_THREADS, threads_lazy);
-            // do work via work_on_behalf function
-            printf("load_work_on_behalf()\n");
-            load_work_on_behalf(work, NUM_THREADS, threads_wob);
-            // wait
-            printf("wait..\n");
-            while (!finish)
-                sleep(1);
-            // stop serving ignored addresses
-            opro_ignored_addresses_serve_cancel();
-        }
-        else if (pid > 0)
-        {
-            int status;
-            wait(&status);
-        }
+        int status;
+        wait(&status);
     }
 }

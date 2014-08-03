@@ -36,7 +36,8 @@ SRC = $(wildcard *.c)
 OBJ = $(SRC:.c=.o)
 
 SO_LIBS =
-APP_LIBS = libopro.a libload.so
+APP_LIBS = libopro.a
+TESTAPP_LIBS = libload.so
 ifdef LIBUNWIND
 	SO_LIBS += -Wl,-Bstatic -lunwind-ptrace -lunwind-generic -lunwind
 	APP_LIBS += -Wl,-Bstatic -lunwind-ptrace -lunwind-generic -lunwind
@@ -71,8 +72,11 @@ libopro.so: opro.o
 libload.so: load.o 
 	$(CC) $(CFLAGS) -o $@ $^ $(SO_LIBS) -shared -Wl,--exclude-libs=ALL
 
-testapp: libopro.a libload.so testapp.o 
+opro: libopro.a opro_main.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(APP_LIBS) -L. -Wl,-rpath=.
+
+testapp: libopro.a libload.so testapp.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(TESTAPP_LIBS) $(APP_LIBS) -L. -Wl,-rpath=.
 
 install: libopro.a libopro.so
 	mkdir -p $(libdir)
