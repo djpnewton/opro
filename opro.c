@@ -192,7 +192,7 @@ static int sample_corkscrew(pid_t tid)
     for (i = 0; i < count; i++)
     {
         uint64_t ip = (uint64_t)frames[i].absolute_pc;
-        printf("%d - ip: %p, %s, %s, %s\n", i, ip, symbols[i].map_name, symbols[i].symbol_name, symbols[i].demangled_name);
+        //printf("%d - ip: %p, %s, %s, %s\n", i, ip, symbols[i].map_name, symbols[i].symbol_name, symbols[i].demangled_name);
         if (ip >= image_mm.start && ip <= image_mm.end && !is_ignored_addr(ip))
         {
             profile_counter_image++;
@@ -279,7 +279,7 @@ static void profile_thread(void* arg)
     while (!finish_profiling)
     {
         load_thread_list(gpid, 1, thread_list, MAX_THREAD_LIST, &thread_count);
-        printf("thread count: %d\n", thread_count);
+        //printf("thread count: %d\n", thread_count);
         int i;
         for (i = 0; i < thread_count; i++)
         {
